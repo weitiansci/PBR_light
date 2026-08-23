@@ -127,18 +127,23 @@ def load_texture(path, max_side=640, srgb_to_linear=True, keep_alpha=False):
 
 # ==================== 视差遮挡贴图（POM） ====================
 def parallax_occlusion(depth_tex, u, v, Vt, T_w, B_w, N_w,
-                       V_world, max_disp, n_steps=8):
-    """视差遮挡贴图：沿视线方向在高度场中光线步进，返回偏移后的 UV。
+                       V_world, max_disp_u, max_disp_v, world_depth, n_steps=8):
+    """视差遮挡贴图：沿视线方向在高度场中光线步进，返回偏移后的 UV 及世界位移。
 
     depth_tex: 深度贴图（R 通道作为高度场，白=凸起/近，黑=凹陷/远）
     Vt: 切线空间视线向量 (N, 3)
-    max_disp: 最大 UV 偏移幅度
+    max_disp_u: u 轴最大 UV 偏移幅度（世界尺度换算后）
+    max_disp_v: v 轴最大 UV 偏移幅度（世界尺度换算后）
+    world_depth: 世界空间最大位移量（用于计算命中点世界位移）
     n_steps: 光线步进步数（越多越精确但越慢）
+
+    返回: (u_offset, v_offset, disp_world)
+      disp_world: 命中点沿视线的世界位移量 (1 - hit_z) * world_depth
     """
     # Vt 为表面→相机方向（正面可见时 Vt_z>0），下限钳制防掠射角除零
     Vt_z = np.clip(Vt[:, 2], 0.01, None)
-    du_full = -Vt[:, 0] / Vt_z * max_disp
-    dv_full = -Vt[:, 1] / Vt_z * max_disp
+    du_full = -Vt[:, 0] / Vt_z * max_disp_u
+    dv_full = -Vt[:, 1] / Vt_z * max_disp_v
 
     dz_per_step = 1.0 / n_steps
     # first_hit: 记录首次光线穿入表面的步进索引
@@ -148,9 +153,9 @@ def parallax_occlusion(depth_tex, u, v, Vt, T_w, B_w, N_w,
 
     for i in range(n_steps):
         ray_z = 1.0 - (i + 1) * dz_per_step
-        # 步进采样 UV 用 wrap 而非 clamp，避免边缘拉伸像素造成假命中
-        su = (u + (i + 1) * du_full / n_steps) % 1.0
-        sv = (v + (i + 1) * dv_full / n_steps) % 1.0
+        # FIX4(a): 步进采样改用 clamp 而非 wrap，与 albedo/normal 采样一致，避免边缘 wrap 造成的高度/颜色不一致
+        su = np.clip(u + (i + 1) * du_full / n_steps, 0.0, 1.0)
+        sv = np.clip(v + (i + 1) * dv_full / n_steps, 0.0, 1.0)
         h = sample_texture(depth_tex, su, sv)
         if h.ndim > 1:
             h = h[:, 0]
@@ -173,9 +178,16 @@ def parallax_occlusion(depth_tex, u, v, Vt, T_w, B_w, N_w,
     offset_v = t_interp * dv_full / n_steps
 
     # 边缘安全衰减：按像素到 UV 边界的距离收缩偏移，确保最终 UV 不越界
+    # fade 同时应用于 UV 偏移和世界位移，保持几何与纹理一致
     border = np.minimum(np.minimum(u, 1.0 - u), np.minimum(v, 1.0 - v))
     fade = np.clip(border / (np.abs(offset_u) + np.abs(offset_v) + 1e-6), 0.0, 1.0)
-    return u + offset_u * fade, v + offset_v * fade
+
+    # FIX2: 计算命中点沿视线的世界位移 disp = (1 - hit_z) * world_depth * fade
+    # hit_z = 1 - t_interp / n_steps（线性插值后的高度场 z）
+    hit_z = 1.0 - t_interp / n_steps
+    disp = (1.0 - hit_z) * world_depth * fade
+
+    return u + offset_u * fade, v + offset_v * fade, disp
 
 
 # ==================== 软光栅化 ====================
@@ -289,17 +301,30 @@ def render_frame(light_pos, yaw_deg, pitch_deg, roll_deg, eye,
             if (r.get("depth_tex") is not None and
                     r.get("depth_on", True) and
                     r.get("depth_scale", 1.0) > 0):
-                max_disp = (r.get("max_displacement", 0.005) *
-                            r.get("depth_scale", 1.0))
+                # FIX3: 按图层世界尺寸做各向异性换算
+                scale = r.get("scale", 1.0)
+                span_u = 2.0 * r["half_w"] * scale      # u 轴世界宽度
+                span_v = 2.0 * r["half_h"] * scale      # v 轴世界高度
+                max_disp = r.get("max_displacement", 0.005) * r.get("depth_scale", 1.0)
+                world_depth = max_disp * max(span_u, span_v)  # 世界空间最大位移
+                max_disp_u = world_depth / span_u  # u/v 轴独立的最大 UV 偏移
+                max_disp_v = world_depth / span_v
                 Vt_x = V[:, 0] * T_w[0] + V[:, 1] * T_w[1] + V[:, 2] * T_w[2]
                 Vt_y = V[:, 0] * B_w[0] + V[:, 1] * B_w[1] + V[:, 2] * B_w[2]
                 Vt_z = V[:, 0] * N_w[0] + V[:, 1] * N_w[1] + V[:, 2] * N_w[2]
                 Vt = np.stack([Vt_x, Vt_y, Vt_z], axis=-1)
                 Vt_n = np.sqrt(Vt_x**2 + Vt_y**2 + Vt_z**2) + 1e-8
                 Vt /= Vt_n[:, None]
-                u0, u1 = parallax_occlusion(
+                # FIX4(b): 步数随位移自适应，上限 48
+                base_steps = r.get("pom_steps", 8)
+                n_steps = int(np.clip(base_steps * r.get("depth_scale", 1.0), base_steps, 8))
+                u0, u1, disp = parallax_occlusion(
                     r["depth_tex"], u0, u1, Vt, T_w, B_w, N_w,
-                    V, max_disp, n_steps=r.get("pom_steps", 32))
+                    V, max_disp_u, max_disp_v, world_depth, n_steps=n_steps)
+                # FIX2: 用命中点世界位移修正片元几何（在 alpha 过滤之前完成）
+                pos = pos - V * disp[:, None]
+                depth = depth + disp          # 沿视线方向即靠近相机
+                V = normalize(eye - pos)      # 重算视线向量
             albedo = sample_texture(r["albedo_tex"], u0, u1)
             if albedo.shape[1] == 4:
                 # alpha 测试镂空：透明像素丢弃，不遮挡后方矩形
@@ -308,7 +333,8 @@ def render_frame(light_pos, yaw_deg, pitch_deg, roll_deg, eye,
                                           uv[keep], depth[keep])
                 V = V[keep]
                 albedo = albedo[keep, :3]
-                u0, u1 = uv[:, 0], uv[:, 1]
+                # FIX1: 仅按 keep 过滤，不回退到光栅化原始 UV
+                u0, u1 = u0[keep], u1[keep]
             # 预计算共享纹理索引（normal 与 ORM 尺寸相同时复用）
             n_row, n_col = _uv_to_indices(r["normal_tex"], u0, u1)
             if r["orm_tex"] is not None:
@@ -432,12 +458,12 @@ if __name__ == "__main__":
     rects = [
         dict(albedo_tex=albedo_tex, normal_tex=normal_tex, orm_tex=None,
              depth_tex=depth_tex, depth_on=True, depth_scale=1.0,
-             max_displacement=0.005, pom_steps=8,
+             max_displacement=0.005, pom_steps=3,
              fixed_orm=(1.0, 0.45, 0.05), z=0.1, half_w=half_w1, half_h=half_h1,
              scale=1.0),
         dict(albedo_tex=bg_albedo_tex, normal_tex=bg_normal_tex, orm_tex=orm_tex,
              depth_tex=bg_depth_tex, depth_on=True, depth_scale=1.0,
-             max_displacement=0.005, pom_steps=8,
+             max_displacement=0.005, pom_steps=3,
              fixed_orm=None, z=-0.1,
              half_w=half_w2, half_h=half_h2, scale=1.0),
     ]

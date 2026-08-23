@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties, fontManager
+from matplotlib.widgets import Slider, Button
 import platform
 import os
 
@@ -20,14 +21,14 @@ def setup_chinese_font():
     for name in candidates:
         if name in available:
             plt.rcParams["font.sans-serif"] = [name] + plt.rcParams["font.sans-serif"]
-            print(f"✓ 已设置中文字体: {name}")
+            print(f"[OK] 已设置中文字体: {name}")
             return
     # 兜底：扫描含 CJK 关键字的字体
     for f in fontManager.ttflist:
         low = f.name.lower()
         if any(k in low for k in ["cjk", "hei", "song", "noto sans sc"]):
             plt.rcParams["font.sans-serif"] = [f.name] + plt.rcParams["font.sans-serif"]
-            print(f"✓ 已设置中文字体(兜底): {f.name}")
+            print(f"[OK] 已设置中文字体(兜底): {f.name}")
             return
     print("⚠ 未找到中文字体，请安装后重试")
 
@@ -213,6 +214,120 @@ def load_base_texture(path, max_side=720):
     return np.clip(img, 0, 1)
 
 
+# ==================== 交互式控制界面 ====================
+def interactive_render(x_coor, y_coor, base_tex, light_pos_init, view_pos, params):
+    """交互式渲染：左半边显示渲染结果，右半边放控件"""
+    extent = [-x_coor.max(), x_coor.max(), -1, 1]
+
+    # 创建左右分栏布局：左 60% 显示图像，右 40% 放控件
+    fig = plt.figure(figsize=(14, 7))
+    gs = fig.add_gridspec(1, 2, width_ratios=[3, 2], wspace=0.05)
+
+    # 左侧：渲染结果显示区
+    ax_img = fig.add_subplot(gs[0, 0])
+
+    # 初始渲染
+    result = render_holo(x_coor, y_coor, base_tex, light_pos_init, view_pos, **params)
+    mx = np.max(result)
+    if mx > 0:
+        result = result / mx
+    result = np.clip(result, 0, 1) ** (1.0 / 2.2)
+
+    im = ax_img.imshow(result, extent=extent)
+    ax_img.set_title('彩虹结构色渲染（拖动右侧滑块调整光源）', fontsize=13)
+    ax_img.axis('off')
+
+    # 右侧：控件区
+    ax_ctrl = fig.add_subplot(gs[0, 1])
+    ax_ctrl.axis('off')
+    ax_ctrl.set_title('光源控制', fontsize=13, pad=20)
+
+    # 滑块位置（在右侧区域内相对定位）
+    slider_left = 0.05
+    slider_width = 0.85
+    slider_height = 0.04
+    start_top = 0.8
+
+    ax_x = fig.add_axes([0.62, start_top, slider_width * 0.35, slider_height])
+    ax_y = fig.add_axes([0.62, start_top - 0.08, slider_width * 0.35, slider_height])
+    ax_z = fig.add_axes([0.62, start_top - 0.16, slider_width * 0.35, slider_height])
+
+    slider_x = Slider(ax_x, 'Light X', -3.0, 3.0, valinit=light_pos_init[0], valstep=0.05)
+    slider_y = Slider(ax_y, 'Light Y', -3.0, 3.0, valinit=light_pos_init[1], valstep=0.05)
+    slider_z = Slider(ax_z, 'Light Z', 0.1, 5.0, valinit=light_pos_init[2], valstep=0.05)
+
+    # 光栅类型选择
+    ax_grating = fig.add_axes([0.62, start_top - 0.28, 0.3, 0.12])
+    from matplotlib.widgets import RadioButtons
+    radio = RadioButtons(ax_grating, ('linear', 'radial', 'spiral', 'random'), active=0)
+
+    # 光栅周期滑块
+    ax_period = fig.add_axes([0.62, start_top - 0.42, slider_width * 0.35, slider_height])
+    slider_period = Slider(ax_period, 'Grating Period', 200.0, 2000.0, valinit=params['grating_period'], valstep=50.0)
+
+    # 金属度/粗糙度滑块
+    ax_metallic = fig.add_axes([0.62, start_top - 0.52, slider_width * 0.35, slider_height])
+    slider_metallic = Slider(ax_metallic, 'Metallic', 0.0, 1.0, valinit=params['metallic'], valstep=0.05)
+
+    ax_roughness = fig.add_axes([0.62, start_top - 0.60, slider_width * 0.35, slider_height])
+    slider_roughness = Slider(ax_roughness, 'Roughness', 0.05, 1.0, valinit=params['roughness'], valstep=0.05)
+
+    # 彩虹强度滑块
+    ax_irid = fig.add_axes([0.62, start_top - 0.70, slider_width * 0.35, slider_height])
+    slider_irid = Slider(ax_irid, 'Iridescence', 0.0, 2.0, valinit=params['iridescence'], valstep=0.1)
+
+    # 当前参数状态
+    current_params = params.copy()
+    current_grating_type = params['grating_type']
+
+    def update(val=None):
+        nonlocal current_params, current_grating_type
+        light_pos = np.array([slider_x.val, slider_y.val, slider_z.val])
+        current_params['grating_period'] = slider_period.val
+        current_params['metallic'] = slider_metallic.val
+        current_params['roughness'] = slider_roughness.val
+        current_params['iridescence'] = slider_irid.val
+        current_grating_type = radio.value_selected
+
+        result = render_holo(x_coor, y_coor, base_tex, light_pos, view_pos,
+                                 grating_type=current_grating_type, **{k:v for k,v in current_params.items() if k != 'grating_type'})
+        mx = np.max(result)
+        if mx > 0:
+            result = result / mx
+        result = np.clip(result, 0, 1) ** (1.0 / 2.2)
+        im.set_data(result)
+        fig.canvas.draw_idle()
+
+    def on_grating_change(label):
+        update()
+
+    slider_x.on_changed(update)
+    slider_y.on_changed(update)
+    slider_z.on_changed(update)
+    slider_period.on_changed(update)
+    slider_metallic.on_changed(update)
+    slider_roughness.on_changed(update)
+    slider_irid.on_changed(update)
+    radio.on_clicked(on_grating_change)
+
+    # 重置按钮
+    ax_reset = fig.add_axes([0.62, 0.05, 0.15, 0.05])
+    btn_reset = Button(ax_reset, '重置')
+    def reset(event):
+        slider_x.set_val(light_pos_init[0])
+        slider_y.set_val(light_pos_init[1])
+        slider_z.set_val(light_pos_init[2])
+        slider_period.set_val(params['grating_period'])
+        slider_metallic.set_val(params['metallic'])
+        slider_roughness.set_val(params['roughness'])
+        slider_irid.set_val(params['iridescence'])
+        radio.set_active(0)
+    btn_reset.on_clicked(reset)
+
+    plt.suptitle('交互式光栅彩虹渲染', fontsize=15)
+    plt.show()
+
+
 # ==================== 主程序 ====================
 if __name__ == "__main__":
     IMG_PATH = "恋与深空.png"
@@ -240,67 +355,5 @@ if __name__ == "__main__":
         iridescence=1.0,
     )
 
-    print("渲染中...")
-    result = render_holo(x_coor, y_coor, base_tex, light_pos, view_pos, **params)
-
-    # 归一化 + Gamma（tanh 已锁住高光，无需 Reinhard）
-    mx = np.max(result)
-    if mx > 0:
-        result = result / mx
-    result = np.clip(result, 0, 1) ** (1.0 / 2.2)
-
-    # ---- 可视化：原图 vs 渲染结果 ----
-    extent = [-aspect, aspect, -1, 1]
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-
-    axes[0].imshow(base_tex, origin='lower', extent=extent)
-    axes[0].set_title('基础颜色（恋与深空）', fontsize=13)
-    axes[0].axis('off')
-
-    axes[1].imshow(result, origin='lower', extent=extent)
-    axes[1].set_title(f'彩虹结构色渲染\n光栅:{params["grating_type"]}, d={params["grating_period"]}nm', fontsize=13)
-    axes[1].axis('off')
-
-    # 彩虹强度对比：无底色彩虹 vs 混合
-    white_tex = np.ones_like(base_tex) * 0.95
-    pure_rainbow = render_holo(x_coor, y_coor, white_tex, light_pos, view_pos, **params)
-    mx2 = np.max(pure_rainbow)
-    if mx2 > 0:
-        pure_rainbow = pure_rainbow / mx2
-    pure_rainbow = np.clip(pure_rainbow, 0, 1) ** (1.0 / 2.2)
-    axes[2].imshow(pure_rainbow, origin='lower', extent=extent)
-    axes[2].set_title('纯彩虹（白底参考）', fontsize=13)
-    axes[2].axis('off')
-
-    plt.suptitle('光栅彩虹反射光 × 基础颜色 物理混合', fontsize=15)
-    plt.tight_layout()
-    plt.savefig('holo_render_result.png', dpi=150, bbox_inches='tight')
-    plt.show()
-
-    # ---- 多角度观察（闪卡转动效果）----
-    print("生成多角度对比...")
-    views = [
-        np.array([0.0, 0.0, 3.0]),
-        np.array([1.2, 0.0, 2.5]),
-        np.array([-1.2, 0.6, 2.0]),
-        np.array([0.0, 1.5, 2.2]),
-        np.array([0.9, -0.9, 3.2]),
-        np.array([-0.6, -1.2, 1.8]),
-    ]
-    fig2, axes2 = plt.subplots(2, 3, figsize=(15, 10))
-    for idx, vp in enumerate(views):
-        ax = axes2[idx // 3, idx % 3]
-        r = render_holo(x_coor, y_coor, base_tex, light_pos, vp, **params)
-        mx = np.max(r)
-        if mx > 0:
-            r = r / mx
-        r = np.clip(r, 0, 1) ** (1.0 / 2.2)
-        ax.imshow(r, origin='lower', extent=extent)
-        ax.set_title(f'视角 ({vp[0]:.1f}, {vp[1]:.1f}, {vp[2]:.1f})', fontsize=10)
-        ax.axis('off')
-    plt.suptitle('不同观察角度 — 闪卡转动时彩虹流动', fontsize=14)
-    plt.tight_layout()
-    plt.savefig('holo_render_multiview.png', dpi=150, bbox_inches='tight')
-    plt.show()
-
-    print("完成！输出: holo_render_result.png / holo_render_multiview.png")
+    print("启动交互式界面（左侧显示渲染，右侧控制参数）...")
+    interactive_render(x_coor, y_coor, base_tex, light_pos, view_pos, params)
