@@ -18,6 +18,9 @@ FG_MASK_PATH = os.path.join(BASE_DIR, "恋与深空_前景mask.png")
 BG_MASK_PATH = os.path.join(BASE_DIR, "恋与深空_背景mask.png")
 BG_IMG_PATH = os.path.join(BASE_DIR, "恋与深空_背景.png")
 
+depth_DIR = os.path.join(BASE_DIR, "空白深度.png")
+rgba_zeros_DIR = os.path.join(BASE_DIR, "空白颜色.png")
+normal_DIR = os.path.join(BASE_DIR, "空白法线.png")
 
 def main():
     img = Image.open(SRC_PATH).convert("RGBA")
@@ -29,6 +32,13 @@ def main():
     # 前景 mask 取反 -> 背景 mask
     bg_mask = (255 - fg_mask).astype(np.uint8)
 
+    rgba_zero = np.zeros_like(rgba)
+    normal = np.zeros_like(rgba)
+    normal[:,:,0] = 127
+    normal[:,:,1] = 127
+    normal[:,:,2] = 255
+    depth = rgba_zero[:,:,:3]
+
     # 保存 8bit 灰度 PNG（mode="L" 保证位深为 8，而非 RGBA 32bit）
     Image.fromarray(fg_mask, mode="L").save(FG_MASK_PATH, bits=8)
     Image.fromarray(bg_mask, mode="L").save(BG_MASK_PATH, bits=8)
@@ -39,10 +49,16 @@ def main():
     bg_rgba[..., 3] = bg_mask
     Image.fromarray(bg_rgba, mode="RGBA").save(BG_IMG_PATH)
 
+    Image.fromarray(rgba_zero, mode="RGBA").save(rgba_zeros_DIR)
+    Image.fromarray(normal, mode="RGBA").save(normal_DIR)
+    Image.fromarray(depth, mode="RGB").save(depth_DIR)
+
     h, w = fg_mask.shape
     print(f"图像尺寸: {w} x {h}")
-    print(f"前景 mask -> {os.path.basename(FG_MASK_PATH)}  (非零像素: {(fg_mask > 0).sum()})")
-    print(f"背景 mask -> {os.path.basename(BG_MASK_PATH)}  (非零像素: {(bg_mask > 0).sum()})")
+    print(
+        f"前景 mask -> {os.path.basename(FG_MASK_PATH)}  (非零像素: {(fg_mask > 0).sum()})")
+    print(
+        f"背景 mask -> {os.path.basename(BG_MASK_PATH)}  (非零像素: {(bg_mask > 0).sum()})")
     print(f"背景图片  -> {os.path.basename(BG_IMG_PATH)}  (RGBA, A=背景mask)")
 
 
