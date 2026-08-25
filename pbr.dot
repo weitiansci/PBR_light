@@ -1,0 +1,496 @@
+// =====================================================================
+//  实时渲染 · PBR 微表面理论 · 完全自包含知识图谱
+//  渲染: dot -Tsvg pbr_full.dot -o pbr_full.svg
+//  高清PNG: dot -Tpng -Gdpi=300 pbr_full.dot -o pbr_full.png
+//  中文若显示方块: 按系统替换 fontname (见文件末尾注释)
+// =====================================================================
+digraph PBR_Full_Knowledge_Tree {
+
+    /* ================= 全局设置 ================= */
+    graph [
+        charset="UTF-8",
+        fontname="Microsoft YaHei",
+        rankdir=TB,
+        ordering=out,
+        newrank=true,
+        nodesep=0.5,
+        ranksep=0.7,
+        bgcolor="#0b1020",
+        labelloc=t,
+        fontsize=22,
+        fontcolor="#f8fafc",
+        label="实时渲染 · PBR 微表面理论 · 完全自包含知识图谱（根节点 = 最终输出 RGB）\n彩色节点 = 物理意义 + 数学公式   |   深蓝等宽节点 = 对应的 GLSL 实现（虚线连接）\n紫=显示变换  蓝=直接光照  绿=漫反射  橙=镜面 Cook-Torrance  黄=IBL 间接光照  深绿=输入参数"
+    ];
+    node [
+        fontname="Microsoft YaHei", shape=box, style="rounded,filled",
+        fontsize=12.5, penwidth=1.2, color="#475569",
+        fillcolor="#1e293b", fontcolor="#e2e8f0", margin=0.18
+    ];
+    edge [
+        fontname="Microsoft YaHei", color="#64748b",
+        arrowsize=0.8, fontsize=11, fontcolor="#94a3b8"
+    ];
+
+    /* ================= 根节点 ================= */
+    ROOT [label=
+        "【根节点】最终输出 RGB\n" +
+        "FragColor（sRGB · LDR · 范围 [0,1]）\n" +
+        "──────────────────────────────\n" +
+        "全树公式一句话总览：\n" +
+        "RGB = pow( ToneMap( L_e + Σ 直接光 + IBL ), 1/2.2 )\n" +
+        "向下逐层分解：① 伽马编码 ② 色调映射 ③ 渲染方程",
+        fillcolor="#dc2626", color="#fca5a5", fontcolor="#ffffff",
+        penwidth=3, fontsize=15];
+
+    /* ================= A 分支：显示变换 ================= */
+    GAMMA [label=
+        "A2 · 伽马校正（线性 → sRGB）\n" +
+        "显示器以伽马曲线显示，线性光必须编码回感知空间，\n" +
+        "否则画面偏暗、对比错误（这是整条管线的最后一步）\n" +
+        "──────────────────────────────\n" +
+        "公式：c_srgb = c_ldr ^ (1/2.2)",
+        fillcolor="#7c3aed"];
+
+    TONEMAP [label=
+        "A1 · 色调映射 Tone Mapping（HDR → LDR）\n" +
+        "把无上限的 HDR 辐射率压缩到显示器可表达的 [0,1]，\n" +
+        "同时保留高光细节（在伽马校正之前执行）\n" +
+        "──────────────────────────────\n" +
+        "Reinhard：  c / (c + 1)     —— 简单、可能发灰\n" +
+        "ACES（引擎常用，高光过渡与对比更好）：\n" +
+        "ACES(x) = clamp( x·(2.51x + 0.03) / ( x·(2.43x + 0.59) + 0.14 ) )",
+        fillcolor="#7c3aed"];
+
+    /* ================= B：渲染方程 ================= */
+    RE [label=
+        "B · 出射辐射率 L_o（线性 HDR 空间）—— 一切光照计算的总纲\n" +
+        "渲染方程（Kajiya 1986，所有光照模型的数学根基）：\n" +
+        "──────────────────────────────\n" +
+        "L_o(p, ωo) = L_e(p, ωo) + ∫Ω f_r(p, ωi, ωo) · L_i(p, ωi) · (n·ωi) dωi\n" +
+        "──────────────────────────────\n" +
+        "· f_r = BRDF：从 ωi 方向入射的光被反射到 ωo 方向的比例\n" +
+        "· (n·ωi)：Lambert 余弦项 —— 斜射光按投影面积衰减能量\n" +
+        "· ∫Ω：上半球所有入射方向的积分 —— 实时无法解析求解！\n" +
+        "工程拆分（积分近似）：\n" +
+        "L_o ≈ Σ 解析光源（B1 直接光照） + 环境贴图近似（B2 IBL 间接光照）",
+        fillcolor="#0369a1", color="#7dd3fc", penwidth=2.5, fontsize=13.5];
+
+    B0 [label=
+        "B0 · 自发光项 L_e —— 不参与光照计算，直接读贴图\n" +
+        "──────────────────────────────\n" +
+        "vec3 emission = texture(emissionMap, uv).rgb;\n" +
+        "vec3 color = Lo + ambient + emission;   // 渲染方程最终组装",
+        fillcolor="#475569"];
+
+    /* ================= B1 直接光照集群 ================= */
+    subgraph cluster_direct {
+        label="B1 · 直接光照（解析光源：积分 → 离散求和）";
+        labelloc=t; fontsize=17; fontcolor="#bae6fd";
+        style="rounded,filled"; fillcolor="#082f49"; color="#0ea5e9";
+
+        DIRECT_SUM [label=
+            "B1 总纲：对 N 盏解析光源（点光/平行光/聚光）逐盏求和\n" +
+            "每盏灯：Lo += f_r · L_k · (n·l_k)\n" +
+            "──────────────────────────────\n" +
+            "= [ k_d·(albedo/π)  +  k_s·D·F·G / 4(n·v)(n·l) ] · L_k · NdotL\n" +
+            "──────────────────────────────\n" +
+            "· 外层 NdotL 与分母的 (n·l) 数学上可约分 → D·G·F / 4(n·v)\n" +
+            "  （许多引擎这么做，顺便避免除以接近 0 的 NdotL）",
+            fillcolor="#0284c7"];
+
+        INCIDENT [label=
+            "B1.1 · 入射光项：L_k · (n·l)\n" +
+            "· 光色 × 强度 × 距离衰减（点光物理衰减 ∝ 1/d²）\n" +
+            "· NdotL = max(n·l, 0)：入射角投影衰减，背面取 0",
+            fillcolor="#0ea5e9"];
+
+        BRDF_SPLIT [label=
+            "B1.2 · BRDF 能量守恒拆分（微表面理论的核心分界）\n" +
+            "──────────────────────────────\n" +
+            "f_r = k_d · f_diff + k_s · f_spec\n" +
+            "k_s = F                      （当场被反射走的比例 = 菲涅尔）\n" +
+            "k_d = (1 - F)·(1 - metallic) （剩余折射进入材质内部）\n" +
+            "──────────────────────────────\n" +
+            "物理意义：未被反射的光进入材质内部多次散射后射出 = 漫反射；\n" +
+            "金属无次表面散射（自由电子直接吸收）→ 乘 (1-metallic)，\n" +
+            "所以纯金属漫反射为 0",
+            fillcolor="#0ea5e9"];
+
+        DIFFUSE [label=
+            "漫反射分支 · Lambert BRDF（内部多次散射近似各向同性）\n" +
+            "──────────────────────────────\n" +
+            "f_diff = albedo / π\n" +
+            "──────────────────────────────\n" +
+            "· /π 保证 ∫Ω (1/π)·cosθ dω = 1（能量守恒）\n" +
+            "· albedo = 进入材质后未被吸收、重新射出的光的比例（材质颜色）",
+            fillcolor="#059669"];
+
+        CT [label=
+            "镜面反射分支 · Cook-Torrance 微表面 BRDF（PBR 的心脏）\n" +
+            "──────────────────────────────\n" +
+            "f_spec = D(h) · F(ωo) · G(ωi, ωo) / [ 4·(n·ωo)·(n·ωi) ]\n" +
+            "──────────────────────────────\n" +
+            "微表面理论三大假设：\n" +
+            "① 表面由无数小于像素、大于光波长的微小镜面组成，\n" +
+            "   可统计描述，无需逐条追踪光线；\n" +
+            "② 只有法线恰好等于半程向量 h 的微表面，\n" +
+            "   才能把光从 l 反射进眼睛 v；\n" +
+            "③ roughness 控制微表面法线分散程度：\n" +
+            "   集中 → 高光锐利（镜子）；分散 → 高光弥散（磨砂）\n" +
+            "──────────────────────────────\n" +
+            "三项分工：D = 有多少微表面参与，G = 多少没被同伴挡住，\n" +
+            "F = 每块反射多少光；分母 = 微表面投影面积 → 宏观 BRDF 的换算",
+            fillcolor="#ea580c", color="#fdba74", penwidth=2];
+
+        D [label=
+            "D 项 · GGX（Trowbridge-Reitz）法线分布函数\n" +
+            "= 微表面法线与半程向量 h 对齐的比例（概率密度）\n" +
+            "──────────────────────────────\n" +
+            "D(h) = α² / [ π · ( (n·h)²·(α² - 1) + 1 )² ]\n" +
+            "α = roughness²\n" +
+            "──────────────────────────────\n" +
+            "· α = roughness² 是 Disney 感知重映射：滑条 0→1 视觉变化线性\n" +
+            "· GGX 有长尾 → 金属高光边缘亮边，更符合真实观测\n" +
+            "· 业界事实标准：UE4 / Unity URP 默认",
+            fillcolor="#f97316"];
+
+        G [label=
+            "G 项 · Smith 几何函数（Shadowing + Masking）\n" +
+            "= 反射光不被同伴微表面遮挡的存活概率\n" +
+            "──────────────────────────────\n" +
+            "Shadowing：入射光在到达微表面前被前方微表面挡住\n" +
+            "Masking：反射光在出射路上被同伴微表面挡住\n" +
+            "──────────────────────────────\n" +
+            "G(ωi, ωo) = G1(ωo) · G1(ωi)\n" +
+            "G1(x) = (n·x) / [ (n·x)·(1-k) + k ]\n" +
+            "──────────────────────────────\n" +
+            "k 的取值：直接光照 k = (roughness+1)²/8；\n" +
+            "IBL 用 k = roughness²/2（Karis 约定）",
+            fillcolor="#f97316"];
+
+        F [label=
+            "F 项 · 菲涅尔方程（Schlick 近似）\n" +
+            "界面反射比例随入射角增大：垂直入射最低（F0），\n" +
+            "掠射角 → 100%（所以斜看水面/桌面像镜子）\n" +
+            "──────────────────────────────\n" +
+            "F(ωo) = F0 + (1 - F0) · (1 - h·ωo)^5\n" +
+            "──────────────────────────────\n" +
+            "F0 = 垂直入射反射率：\n" +
+            "· 电介质 IOR≈1.5 → F0 = ((1-1.5)/(1+1.5))² ≈ 0.04\n" +
+            "· 金属用 albedo 作为 F0（带颜色：金黄、铜橙）\n" +
+            "· h·ωo：入射光相对微表面法线的角度",
+            fillcolor="#f97316"];
+
+        F0_TABLE [label=
+            "叶子 · 常见材质 F0 速查表\n" +
+            "──────────────────────────────\n" +
+            "电介质（灰度值）：水 0.02 · 塑料 0.04 · 玻璃 0.05 · 钻石 0.17\n" +
+            "金属（RGB 带色）：\n" +
+            "铁 (0.56, 0.57, 0.58) · 铜 (0.95, 0.64, 0.54)\n" +
+            "金 (1.00, 0.71, 0.29) · 铝 (0.91, 0.92, 0.92) · 银 (0.97, 0.96, 0.91)",
+            fillcolor="#c2410c"];
+
+        OPTIM [label=
+            "工程优化速查表（移动端必读）\n" +
+            "──────────────────────────────\n" +
+            "· α = roughness²：美术感知与物理粗糙度解耦，贴图存感知值，shader 内平方\n" +
+            "· G 与分母 4(n·v)(n·l) 合并为可见性项 V，只做一次除法（UE4/移动端）：\n" +
+            "  V = 0.5 / ( NdotL·sqrt(NdotV²(1-α²)+α²) + NdotV·sqrt(NdotL²(1-α²)+α²) )\n" +
+            "· pow(1-x, 5) 展开为 t=1-x; t2=t*t; t2*t2*t; 省掉一次 pow 指令\n" +
+            "· 外层 NdotL 与分母 (n·l) 约分，避免除以趋零值产生噪点\n" +
+            "· mediump 精度下给 α² 加下限，防溢出；D 分母预计算\n" +
+            "· IBL 运行时只需 2 次额外采样（预过滤图 + BRDF LUT）\n" +
+            "· 多光源：延迟渲染统一光照 pass；前向渲染用 Forward+ 光源剔除",
+            fillcolor="#334155", color="#94a3b8"];
+    }
+
+    /* ================= B2 IBL 集群 ================= */
+    subgraph cluster_ibl {
+        label="B2 · 间接光照 / IBL 基于图像的环境光照";
+        labelloc=t; fontsize=17; fontcolor="#fde68a";
+        style="rounded,filled"; fillcolor="#3b2300"; color="#f59e0b";
+
+        IBL [label=
+            "B2 总纲：解析光源只有几盏，真实环境是四面八方来的光（天空、墙壁、物体）\n" +
+            "→ 用 HDR 环境贴图 + 离线预计算近似，同样拆漫反射 + 镜面两支",
+            fillcolor="#d97706"];
+
+        IBL_DIFF [label=
+            "B2.1 · 间接漫反射：辐照度贴图 Irradiance Map\n" +
+            "──────────────────────────────\n" +
+            "E(n) = ∫Ω L_i(ωi)·(n·ωi) dωi      （辐照度）\n" +
+            "──────────────────────────────\n" +
+            "· 漫反射 BRDF 是常数 c/π → 提出积分，只需预计算 E(n)\n" +
+            "· 离线做余弦加权半球卷积 → 32×32 分辨率即可（低频信号）\n" +
+            "· 运行时按法线 n 采样一次\n" +
+            "──────────────────────────────\n" +
+            "L_diff_IBL = E(n) · albedo · k_d · AO",
+            fillcolor="#f59e0b", fontcolor="#1c1917"];
+
+        IBL_SPEC [label=
+            "B2.2 · 间接镜面：Split-Sum 拆分求和近似（Karis 2013，UE4 奠基论文）\n" +
+            "∫ L_i · f_spec · cosθ dω 同时依赖环境和 BRDF，维度太高无法穷举预计算，\n" +
+            "拆成两个可独立预计算的部分相乘：\n" +
+            "──────────────────────────────\n" +
+            "L_spec_IBL ≈ [ ∫Ω L_i · D dω ]      ← ① 预过滤环境贴图（按粗糙度分 mip）\n" +
+            "              × [ ∫Ω f_r · cosθ dω ] ← ② BRDF 积分 LUT（只依赖 n·v 与 roughness）\n" +
+            "            = L_prefiltered(R, roughness) · (F0·A + B)",
+            fillcolor="#f59e0b", fontcolor="#1c1917"];
+
+        PREFILTER [label=
+            "① 预过滤环境贴图\n" +
+            "· 离线用 GGX 重要性采样对环境立方体贴图卷积；\n" +
+            "· 粗糙度越高越模糊；不同粗糙度写入不同 mip 层级",
+            fillcolor="#fbbf24", fontcolor="#1c1917"];
+
+        BRDF_LUT [label=
+            "② BRDF 积分查找表（512×512 的 RG 纹理）\n" +
+            "· ∫f_r·cosθ dω 只依赖 (n·v, roughness) 两个变量 → 2D 表；\n" +
+            "· 离线蒙特卡洛重要性采样，输出两个标量 (A, B)：∫ = F0·A + B",
+            fillcolor="#fbbf24", fontcolor="#1c1917"];
+
+        F_ROUGH [label=
+            "F 粗糙表面变体（仅 IBL 使用）\n" +
+            "粗糙表面会削弱掠射角处的菲涅尔增强：\n" +
+            "──────────────────────────────\n" +
+            "F = F0 + ( max(1-roughness, F0) - F0 ) · (1-n·v)^5\n" +
+            "──────────────────────────────\n" +
+            "随后 kS = F，kD = (1-F)(1-metallic)，\n" +
+            "ambient = (kD·diffuseIBL + specularIBL) · AO",
+            fillcolor="#fbbf24", fontcolor="#1c1917"];
+    }
+
+    /* ================= 显示变换集群 ================= */
+    subgraph cluster_display {
+        label="A · 显示变换（线性 HDR → 屏幕可显示）";
+        labelloc=t; fontsize=17; fontcolor="#c4b5fd";
+        style="rounded,filled"; fillcolor="#1e1b4b"; color="#8b5cf6";
+        /* GAMMA / TONEMAP 已声明在此 */
+    }
+
+    /* ================= 输入集群 ================= */
+    subgraph cluster_inputs {
+        label="叶子 · 材质参数与几何向量（所有公式的输入）";
+        labelloc=t; fontsize=17; fontcolor="#86efac";
+        style="rounded,filled"; fillcolor="#052e16"; color="#22c55e";
+
+        LEAF [label=
+            "【叶子节点】所有公式的输入一览（每帧从贴图/相机/光源获得）\n" +
+            "──────────────────────────────\n" +
+            "· albedo 基础色：sRGB 贴图，必须 pow(2.2) 解码回线性空间再用！\n" +
+            "· metallic 金属度 → 决定 F0 = lerp(0.04, albedo, metallic)\n" +
+            "· roughness 粗糙度 → 感知重映射 α = roughness²\n" +
+            "· AO 环境遮蔽（常由烘焙得到，只乘到间接光）、Emission 自发光\n" +
+            "· n 宏观法线（可被切线空间法线贴图扰动）\n" +
+            "· v = normalize(camPos - worldPos) 观察方向\n" +
+            "· l 光源方向；h = normalize(v + l) 半程向量\n" +
+            "  （h = 能把光反射进眼睛的那块微表面的有效法线）\n" +
+            "· 线性贴图（metallic/roughness/AO/法线）不需要伽马解码",
+            fillcolor="#16a34a", color="#86efac", penwidth=2];
+    }
+
+    /* ================= 代码节点（深蓝等宽） ================= */
+    node [
+        shape=box, style=filled, fillcolor="#0f172a", color="#1e3a5f",
+        fontname="Consolas", fontsize=9.5, fontcolor="#93c5fd",
+        margin=0.14, penwidth=1
+    ];
+
+    GAMMA_CODE [label=
+        "// A2 伽马校正：线性 -> sRGB\l" +
+        "color = pow(color, vec3(1.0 / 2.2));\l" +
+        "\l" +
+        "FragColor = vec4(color, 1.0);  // <-- 根节点：最终输出 RGB\l"];
+
+    TONEMAP_CODE [label=
+        "// A1 色调映射\l" +
+        "color = color / (color + vec3(1.0));      // Reinhard\l" +
+        "\l" +
+        "// 备选：ACES 拟合（引擎常用）\l" +
+        "vec3 ACESFilm(vec3 x) {\l" +
+        "    return clamp(\l" +
+        "        (x * (2.51*x + 0.03)) /\l" +
+        "        (x * (2.43*x + 0.59) + 0.14),\l" +
+        "        0.0, 1.0);\l" +
+        "}\l"];
+
+    DIRECT_CODE [label=
+        "vec3 Lo = vec3(0.0);\l" +
+        "for (int i = 0; i < NR_LIGHTS; ++i) {\l" +
+        "    // ---- B1.1 入射光项 ----\l" +
+        "    vec3  L = normalize(lightPos[i] - WorldPos);\l" +
+        "    vec3  H = normalize(V + L);              // 半程向量\l" +
+        "    float d = length(lightPos[i] - WorldPos);\l" +
+        "    vec3  radiance = lightColors[i] / (d*d); // 平方反比衰减\l" +
+        "    float NdotL = max(dot(N, L), 0.0);\l" +
+        "    float NdotV = max(dot(N, V), 0.0);\l" +
+        "\l" +
+        "    // ---- B1.2 Cook-Torrance 三项 ----\l" +
+        "    float D = DistributionGGX(N, H, roughness);\l" +
+        "    float k = (roughness + 1.0);  k = (k*k) / 8.0;\l" +
+        "    float G = GeometrySmith(N, V, L, k);\l" +
+        "    vec3  F = fresnelSchlick(max(dot(H,V), 0.0), F0);\l" +
+        "\l" +
+        "    vec3 spec = (D * G * F) / (4.0*NdotV*NdotL + 0.0001);\l" +
+        "    vec3 kS = F;\l" +
+        "    vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);\l" +
+        "\l" +
+        "    // 渲染方程离散项：f_r * Li * NdotL\l" +
+        "    Lo += (kD * albedo / PI + spec) * radiance * NdotL;\l" +
+        "}\l"];
+
+    INCIDENT_CODE [label=
+        "// 距离衰减（点光源平方反比）\l" +
+        "float distance = length(lightPos[i] - WorldPos);\l" +
+        "float attenuation = 1.0 / (distance * distance);\l" +
+        "vec3 radiance = lightColors[i] * attenuation;\l" +
+        "\l" +
+        "// Lambert 余弦项\l" +
+        "float NdotL = max(dot(N, L), 0.0);\l" +
+        "\l" +
+        "// 聚光灯再乘 smoothstep(锥角)；平行光无衰减\l"];
+
+    SPLIT_CODE [label=
+        "vec3 kS = F;                       // 镜面占比 = 菲涅尔\l" +
+        "vec3 kD = (vec3(1.0) - kS)\l" +
+        "        * (1.0 - metallic);        // 漫反射占比（能量守恒）\l"];
+
+    DIFFUSE_CODE [label=
+        "vec3 diffuseBRDF = kD * albedo / PI;\l" +
+        "\l" +
+        "// UE4 实践：实时渲染 Lambert 已足够；\l" +
+        "// Oren-Nayar 更精确地建模粗糙漫反射，但移动端极少使用\l"];
+
+    D_CODE [label=
+        "float DistributionGGX(vec3 N, vec3 H, float roughness) {\l" +
+        "    float a  = roughness * roughness;   // alpha（感知重映射）\l" +
+        "    float a2 = a * a;                   // alpha^2\l" +
+        "    float NdotH  = max(dot(N, H), 0.0);\l" +
+        "    float NdotH2 = NdotH * NdotH;\l" +
+        "\l" +
+        "    float nom   = a2;\l" +
+        "    float denom = (NdotH2 * (a2 - 1.0) + 1.0);\l" +
+        "    denom = PI * denom * denom;\l" +
+        "    return nom / denom;\l" +
+        "}\l"];
+
+    G_CODE [label=
+        "float GeometrySchlickGGX(float NdotV, float k) {\l" +
+        "    return NdotV / (NdotV * (1.0 - k) + k);\l" +
+        "}\l" +
+        "float GeometrySmith(vec3 N, vec3 V, vec3 L, float k) {\l" +
+        "    float NdotV = max(dot(N, V), 0.0);\l" +
+        "    float NdotL = max(dot(N, L), 0.0);\l" +
+        "    return GeometrySchlickGGX(NdotV, k)    // masking 视线方向\l" +
+        "         * GeometrySchlickGGX(NdotL, k);   // shadowing 光线方向\l" +
+        "}\l" +
+        "// UE4 优化：G 与分母合并为可见性项 V，一次除法（见工程优化速查表）\l"];
+
+    F_CODE [label=
+        "vec3 fresnelSchlick(float cosTheta, vec3 F0) {\l" +
+        "    // cosTheta = dot(H, V)\l" +
+        "    return F0 + (1.0 - F0)\l" +
+        "        * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);\l" +
+        "}\l"];
+
+    F0_CODE [label=
+        "vec3 F0 = vec3(0.04);              // 常见电介质平均值\l" +
+        "F0 = mix(F0, albedo, metallic);    // 金属：F0 = albedo（带颜色）\l"];
+
+    IBL_DIFF_CODE [label=
+        "vec3 irradiance = texture(irradianceMap, N).rgb;\l" +
+        "vec3 diffuseIBL = irradiance * albedo;\l" +
+        "// （albedo/PI 已计入离线卷积；再乘 kD 与 AO）\l"];
+
+    PREFILTER_CODE [label=
+        "vec3 R = reflect(-V, N);            // 镜面反射方向\l" +
+        "vec3 prefilteredColor = textureLod(\l" +
+        "    prefilterMap, R, roughness * 4.0).rgb;\l" +
+        "// 4.0 = 预过滤贴图的最大 mip 层级数\l"];
+
+    LUT_CODE [label=
+        "vec2 brdf = texture(brdfLUT, vec2(NdotV, roughness)).rg;\l" +
+        "vec3 specularIBL = prefilteredColor * (F * brdf.x + brdf.y);\l" +
+        "// brdf.x = A, brdf.y = B，即 F0*A + B\l"];
+
+    F_ROUGH_CODE [label=
+        "vec3 fresnelSchlickRoughness(\l" +
+        "    float cosTheta, vec3 F0, float roughness) {\l" +
+        "  return F0 + (max(vec3(1.0 - roughness), F0) - F0)\l" +
+        "      * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);\l" +
+        "}\l" +
+        "\l" +
+        "vec3 F  = fresnelSchlickRoughness(NdotV, F0, roughness);\l" +
+        "vec3 kS = F;\l" +
+        "vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);\l" +
+        "\l" +
+        "// B2 汇总\l" +
+        "vec3 ambient = (kD * diffuseIBL + specularIBL) * ao;\l"];
+
+    INPUT_CODE [label=
+        "// ===== 材质参数采样（注意色彩空间）=====\l" +
+        "vec3 albedo = pow(texture(albedoMap, uv).rgb,\l" +
+        "                  vec3(2.2));          // sRGB -> 线性 解码！\l" +
+        "float metallic  = texture(metallicMap, uv).r;   // 线性贴图，不解码\l" +
+        "float roughness = texture(roughnessMap, uv).r;\l" +
+        "float ao        = texture(aoMap, uv).r;\l" +
+        "\l" +
+        "// ===== 几何向量 =====\l" +
+        "vec3 V = normalize(camPos - WorldPos);    // 观察方向\l" +
+        "vec3 L = normalize(lightPos - WorldPos);  // 光源方向\l" +
+        "vec3 H = normalize(V + L);                // 半程向量\l" +
+        "vec3 N = GetNormalFromNormalMap();        // 法线贴图扰动\l"];
+
+    /* ================= 边：主干树（实线） ================= */
+    edge [style=solid, arrowhead=normal, color="#64748b"];
+    ROOT -> GAMMA     [label=" 输出前最后一步 "];
+    GAMMA -> TONEMAP  [label=" 输入 = 已压缩的 HDR "];
+    TONEMAP -> RE     [label=" 输入 = 线性 HDR 的 L_o "];
+    RE -> B0;
+    RE -> DIRECT_SUM  [label=" B1 "];
+    RE -> IBL         [label=" B2 "];
+    RE -> LEAF        [style=dashed, color="#22c55e", fontcolor="#4ade80",
+                       label=" 所有公式的输入 ", arrowhead=vee];
+
+    DIRECT_SUM -> INCIDENT;
+    DIRECT_SUM -> BRDF_SPLIT;
+    BRDF_SPLIT -> DIFFUSE [label=" 漫反射 "];
+    BRDF_SPLIT -> CT      [label=" 镜面 "];
+    CT -> D;
+    CT -> G;
+    CT -> F;
+    F -> F0_TABLE [label=" 依赖叶子 "];
+    DIRECT_SUM -> OPTIM [style=dashed, color="#64748b", label=" 工程实践 "];
+
+    IBL -> IBL_DIFF;
+    IBL -> IBL_SPEC;
+    IBL_SPEC -> PREFILTER [label=" 因子① "];
+    IBL_SPEC -> BRDF_LUT  [label=" 因子② "];
+    IBL_SPEC -> F_ROUGH   [label=" 权重 F "];
+
+    /* ================= 边：公式 → 代码（虚线无箭头） ================= */
+    edge [style=dashed, arrowhead=none, color="#475569"];
+    GAMMA -> GAMMA_CODE;
+    TONEMAP -> TONEMAP_CODE;
+    DIRECT_SUM -> DIRECT_CODE;
+    INCIDENT -> INCIDENT_CODE;
+    BRDF_SPLIT -> SPLIT_CODE;
+    DIFFUSE -> DIFFUSE_CODE;
+    D -> D_CODE;
+    G -> G_CODE;
+    F -> F_CODE;
+    F0_TABLE -> F0_CODE;
+    IBL_DIFF -> IBL_DIFF_CODE;
+    PREFILTER -> PREFILTER_CODE;
+    BRDF_LUT -> LUT_CODE;
+    F_ROUGH -> F_ROUGH_CODE;
+    LEAF -> INPUT_CODE;
+}
+
+/* =====================================================================
+   中文渲染若出现方块（□），把 3 处 fontname 换成系统已有中文字体：
+   Windows: "Microsoft YaHei" 或 "SimHei"
+   macOS:   "PingFang SC" 或 "Heiti SC"
+   Linux:   "Noto Sans CJK SC"（sudo apt install fonts-noto-cjk）
+   代码节点 fontname 可按需改为 "Menlo"(mac) / "Courier New"
+   ===================================================================== */
