@@ -9,7 +9,8 @@ matplotlib.widgets.Slider 实时控制：
 场景含两张平行于 xy 平面的矩形（不同 z，深度测试合成）：
   - 前景卡片：恋与深空_rgba.png（基础颜色，alpha 测试镂空）、Nomal.png（法线）、
               金属纹理.png 的 RGB 通道 → ORM 参数
-  - 背景：恋与深空_背景扩展.png、恋与深空_背景扩展Nomal.png、固定 ORM 参数
+  - 背景：恋与深空_背景扩展.png、恋与深空_背景扩展Nomal.png、金属纹理.png 的 ORM 参数、
+          闪卡纹理.png 自发光（滑块控制整体自发光强度）
 ORM 通道约定：R → AO，G → roughness，B → metallic。
 拖动滑块，图框即时更新。
 """
@@ -352,6 +353,16 @@ def render_frame(light_pos, yaw_deg, pitch_deg, roll_deg, eye,
                 ao = np.full(n, ao_f, dtype=np.float32)
                 roughness = np.full(n, np.clip(rough_f, 0.02, 1.0), dtype=np.float32)
                 metallic = np.full(n, metal_f, dtype=np.float32)
+            # 固定 ORM 图层标记：着色阶段每帧重读，保证滑块实时生效
+            fixed_pbr = None if r["orm_tex"] is not None else r["fixed_orm"]
+            # 自发光贴图（线性颜色，强度在着色阶段由 rect["emissive_strength"] 控制）
+            if r.get("emissive_tex") is not None:
+                if r["emissive_tex"].shape[:2] == r["normal_tex"].shape[:2]:
+                    emissive = r["emissive_tex"][n_row, n_col]
+                else:
+                    emissive = sample_texture(r["emissive_tex"], u0, u1)
+            else:
+                emissive = None
             # 法线贴图（使用预计算索引）
             n_tang = r["normal_tex"][n_row, n_col]
             n_tang = n_tang * 2.0 - 1.0
@@ -360,7 +371,8 @@ def render_frame(light_pos, yaw_deg, pitch_deg, roll_deg, eye,
             N /= (np.sqrt(np.sum(N * N, axis=-1, keepdims=True)) + 1e-8)
             geo.append({"ys": ys, "xs": xs, "pos": pos, "depth": depth,
                         "N": N, "V": V, "albedo": albedo, "ao": ao,
-                        "metallic": metallic, "roughness": roughness})
+                        "metallic": metallic, "roughness": roughness,
+                        "emissive": emissive, "fixed_pbr": fixed_pbr})
         _cache.update({"key": rot_key, "geo": geo})
     else:
         geo = _cache["geo"]
@@ -369,11 +381,17 @@ def render_frame(light_pos, yaw_deg, pitch_deg, roll_deg, eye,
                     (SCREEN_H, SCREEN_W, 1))
     depth_acc = np.full((SCREEN_H, SCREEN_W), np.inf, dtype=np.float32)
     light_pos = np.asarray(light_pos, dtype=np.float32)
-    for g in geo:
+    for g, rc in zip(geo, rects):
         if len(g["ys"]) == 0:
             continue
         pos, N, V = g["pos"], g["N"], g["V"]
         albedo, metallic, roughness, ao = g["albedo"], g["metallic"], g["roughness"], g["ao"]
+        # 固定 ORM 图层：每帧从 rect 重读粗糙度/金属度（滑块实时调节）
+        if g["fixed_pbr"] is not None:
+            n = albedo.shape[0]
+            roughness = np.full(n, np.clip(rc["fixed_orm"][1], 0.02, 1.0),
+                                dtype=np.float32)
+            metallic = np.full(n, rc["fixed_orm"][2], dtype=np.float32)
 
         # 点光源（平方反比）
         to_light = light_pos[None, :] - pos
@@ -422,6 +440,10 @@ def render_frame(light_pos, yaw_deg, pitch_deg, roll_deg, eye,
         hdr = (kD * albedo * (1.0 / np.pi) + spec) * \
               (radiance * NdotL)[:, None] + 0.03 * albedo * ao[:, None]
 
+        # 自发光：直接叠加到 HDR，不受光照与阴影影响，强度由滑块控制
+        if g["emissive"] is not None:
+            hdr = hdr + g["emissive"] * rc.get("emissive_strength", 0.0)
+
         # Reinhard 色调映射 + gamma 2.2
         ldr = np.clip(hdr / (hdr + 1.0), 0, 1) ** (1.0 / 2.2)
         nearer = g["depth"] < depth_acc[g["ys"], g["xs"]]
@@ -447,6 +469,8 @@ if __name__ == "__main__":
     depth_tex = load_texture("depth.png", max_side=640, srgb_to_linear=False)
     bg_depth_tex = load_texture("恋与深空_背景扩展depth.png", max_side=640,
                                 srgb_to_linear=False)
+    bg_emissive_tex = load_texture("闪卡纹理.png", max_side=640,
+                                   srgb_to_linear=True)
 
     def quad_size(tex, half_h=1.0):
         return half_h * tex.shape[1] / tex.shape[0], half_h
@@ -459,12 +483,13 @@ if __name__ == "__main__":
         dict(albedo_tex=albedo_tex, normal_tex=normal_tex, orm_tex=None,
              depth_tex=depth_tex, depth_on=True, depth_scale=1.0,
              max_displacement=0.005, pom_steps=3,
-             fixed_orm=(1.0, 0.45, 0.05), z=0.1, half_w=half_w1, half_h=half_h1,
+             fixed_orm=(1.0, 0.5, 0.4), z=0.1, half_w=half_w1, half_h=half_h1,
              scale=1.0),
         dict(albedo_tex=bg_albedo_tex, normal_tex=bg_normal_tex, orm_tex=orm_tex,
              depth_tex=bg_depth_tex, depth_on=True, depth_scale=1.0,
              max_displacement=0.005, pom_steps=3,
              fixed_orm=None, z=-0.1,
+             emissive_tex=bg_emissive_tex, emissive_strength=1.5,
              half_w=half_w2, half_h=half_h2, scale=1.0),
     ]
     print(f"前景卡片: 颜色 {albedo_tex.shape[1]}×{albedo_tex.shape[0]}(RGBA)，"
@@ -472,6 +497,7 @@ if __name__ == "__main__":
           f"ORM(R/G/B=AO/粗糙/金属) {orm_tex.shape[1]}×{orm_tex.shape[0]}")
     print(f"背景: 颜色 {bg_albedo_tex.shape[1]}×{bg_albedo_tex.shape[0]}，"
           f"法线 {bg_normal_tex.shape[1]}×{bg_normal_tex.shape[0]}，"
+          f"自发光 {bg_emissive_tex.shape[1]}×{bg_emissive_tex.shape[0]}，"
           f"固定 ORM(AO/粗糙/金属)={rects[1]['fixed_orm']}")
 
     # 光源 / 相机初始值（前景卡片 ORM 由金属纹理.png 提供，背景为固定值）
@@ -519,16 +545,19 @@ if __name__ == "__main__":
         ("前景Z",     -1.0, 1.0, rects[0]["z"], 0.01),
         ("前景深度",   0.0, 1.0, 1.0, 1.0),       # 0=关, 1=开
         ("前景深度缩放", 0.0, 50.0, rects[0]["depth_scale"], 0.1),
+        ("前景粗糙度", 0.02, 1.0, rects[0]["fixed_orm"][1], 0.01),
+        ("前景金属度", 0.0, 1.0, rects[0]["fixed_orm"][2], 0.01),
         # 背景图层
         ("背景缩放",   0.2, 2.0, rects[1]["scale"], 0.01),
         ("背景Z",     -1.0, 1.0, rects[1]["z"], 0.01),
         ("背景深度",   0.0, 1.0, 1.0, 1.0),       # 0=关, 1=开
         ("背景深度缩放", 0.0, 50.0, rects[1]["depth_scale"], 0.1),
+        ("背景自发光",   0.0, 5.0, rects[1]["emissive_strength"], 0.05),
     ]
     sliders = []
     n_sliders = len(slider_cfg)
     s_left, s_width = 0.63, 0.33
-    s_top, s_gap = 0.95, 0.053
+    s_top, s_gap = 0.95, 0.05
     for i, (label, vmin, vmax, valinit, step) in enumerate(slider_cfg):
         y = s_top - (i + 1) * s_gap
         ax_s = fig.add_axes([s_left, y, s_width, 0.025], facecolor="#222222")
@@ -548,11 +577,13 @@ if __name__ == "__main__":
         rects[0]["z"] = sliders[8].val
         rects[0]["depth_on"] = sliders[9].val > 0.5
         rects[0]["depth_scale"] = sliders[10].val
+        rects[0]["fixed_orm"] = (1.0, sliders[11].val, sliders[12].val)
         # 背景图层
-        rects[1]["scale"] = sliders[11].val
-        rects[1]["z"] = sliders[12].val
-        rects[1]["depth_on"] = sliders[13].val > 0.5
-        rects[1]["depth_scale"] = sliders[14].val
+        rects[1]["scale"] = sliders[13].val
+        rects[1]["z"] = sliders[14].val
+        rects[1]["depth_on"] = sliders[15].val > 0.5
+        rects[1]["depth_scale"] = sliders[16].val
+        rects[1]["emissive_strength"] = sliders[17].val
         t0 = time.perf_counter()
         frame = render_frame(light, yaw, pitch, roll, EYE,
                              SCREEN_W, SCREEN_H, rects, INTENSITY, fov)
