@@ -442,7 +442,11 @@ def render_frame(light_pos, yaw_deg, pitch_deg, roll_deg, eye,
 
         # 自发光：直接叠加到 HDR，不受光照与阴影影响，强度由滑块控制
         if g["emissive"] is not None:
-            hdr = hdr + g["emissive"] * rc.get("emissive_strength", 0.0)
+            # α(r)=sin²(k·(|re-r|+|rl-r|))：视点/光源/像素三方距离调制（类干涉条纹）
+            d_eye = np.sqrt(((pos - eye[None, :]) ** 2).sum(axis=-1))
+            d_lgt = np.sqrt(dist2)                # 复用已算好的到光源平方距离
+            alpha = np.maximum(np.sin(rc.get("alpha_k", 20.0) * (d_eye + d_lgt))-0.5,0) ** 2
+            hdr = hdr + g["emissive"] * rc.get("emissive_strength", 0.0) * alpha[:, None]
 
         # Reinhard 色调映射 + gamma 2.2
         ldr = np.clip(hdr / (hdr + 1.0), 0, 1) ** (1.0 / 2.2)
@@ -489,7 +493,7 @@ if __name__ == "__main__":
              depth_tex=bg_depth_tex, depth_on=True, depth_scale=1.0,
              max_displacement=0.005, pom_steps=3,
              fixed_orm=None, z=-0.1,
-             emissive_tex=bg_emissive_tex, emissive_strength=1.5,
+             emissive_tex=bg_emissive_tex, emissive_strength=1.5, alpha_k=20.0,
              half_w=half_w2, half_h=half_h2, scale=1.0),
     ]
     print(f"前景卡片: 颜色 {albedo_tex.shape[1]}×{albedo_tex.shape[0]}(RGBA)，"
@@ -553,6 +557,7 @@ if __name__ == "__main__":
         ("背景深度",   0.0, 1.0, 1.0, 1.0),       # 0=关, 1=开
         ("背景深度缩放", 0.0, 50.0, rects[1]["depth_scale"], 0.1),
         ("背景自发光",   0.0, 5.0, rects[1]["emissive_strength"], 0.05),
+        ("自发光条纹K",   0.0, 60.0, rects[1]["alpha_k"], 0.5),
     ]
     sliders = []
     n_sliders = len(slider_cfg)
@@ -584,6 +589,7 @@ if __name__ == "__main__":
         rects[1]["depth_on"] = sliders[15].val > 0.5
         rects[1]["depth_scale"] = sliders[16].val
         rects[1]["emissive_strength"] = sliders[17].val
+        rects[1]["alpha_k"] = sliders[18].val
         t0 = time.perf_counter()
         frame = render_frame(light, yaw, pitch, roll, EYE,
                              SCREEN_W, SCREEN_H, rects, INTENSITY, fov)
