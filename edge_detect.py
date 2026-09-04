@@ -5,18 +5,16 @@ from matplotlib.widgets import Slider, Button, RadioButtons
 
 # ===================== 图像加载与预处理 =====================
 # ===================== 1. 读取图像并预处理 =====================
-img = cv2.imdecode(np.fromfile('test.png', dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-img = cv2.imdecode(np.fromfile('恋与深空_rgba.png', dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+# img = cv2.imdecode(np.fromfile('test.png', dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+img = cv2.imdecode(np.fromfile('迪迦_rgba.png', dtype=np.uint8), cv2.IMREAD_UNCHANGED)
 img=img[..., 3]  # 保留RGB通道，去掉Alpha通道
 # img = cv2.imdecode(np.fromfile('迪迦.jpg', dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
 # img = cv2.imdecode(np.fromfile('雷电将军.jpg', dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
 # img = cv2.imdecode(np.fromfile('祢豆子.png', dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
 # img = cv2.imdecode(np.fromfile('少年时代团.jpg', dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
 # img = cv2.imdecode(np.fromfile('网红美女.png', dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+
 if img is None:
-    img = np.zeros((300, 400), dtype=np.uint8)
-    cv2.rectangle(img, (50, 50), (200, 200), 255, -1)
-    cv2.circle(img, (300, 150), 80, 255, -1)
     print("⚠️ 未找到 image.jpg，已生成测试图像")
 
 # ===================== 创建布局 =====================
