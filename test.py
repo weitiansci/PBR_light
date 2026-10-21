@@ -25,7 +25,7 @@ def generate_seed_points(num_points, seed=42):
 
         # 随机法线：在半球上随机采样，确保 z > 0（朝外）
         theta = rng.uniform(0, 2 * np.pi)
-        phi = rng.uniform(0, np.pi / 4)  # 限制倾斜角度，避免太极端
+        phi = rng.uniform(0, np.pi / 9)  # 限制倾斜角度，避免太极端
         nx = np.sin(phi) * np.cos(theta)
         ny = np.sin(phi) * np.sin(theta)
         nz = np.cos(phi)
@@ -177,9 +177,9 @@ def generate_voronoi_pbr_maps(
 # ========== 主程序 ==========
 if __name__ == "__main__":
     generate_voronoi_pbr_maps(
-        width=720,
-        height=1280,
-        num_points=500,
+        width=1206,
+        height=2220,
+        num_points=1000,
         threshold=0.8,  # 调整此值控制显示区域数量
         seed=42,
     )
